@@ -1,0 +1,328 @@
+# ============================================
+# BillionMail - Docker Compose pour Coolify
+# ============================================
+# Utilisez ce fichier dans Coolify au lieu du docker-compose.yml standard
+# 
+# Configuration:
+# 1. Dans Coolify, sélectionnez "Docker Compose" comme type
+# 2. Pointez vers ce fichier (docker-compose.coolify.yml)
+# 3. Configurez les variables d'environnement
+# ============================================
+
+name: billionmail
+
+services:
+  pgsql-billionmail:
+    image: postgres:17.4-alpine
+    hostname: pgsql
+    container_name: billionmail-pgsql
+    volumes:
+      - billionmail-postgresql-data:/var/lib/postgresql/data
+      - billionmail-postgresql-socket:/var/run/postgresql
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - POSTGRES_DB=${DBNAME:-billionmail}
+      - POSTGRES_USER=${DBUSER:-billionmail}
+      - POSTGRES_PASSWORD=${DBPASS:?DBPASS is required}
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DBUSER:-billionmail} -d ${DBNAME:-billionmail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      billionmail-network:
+        aliases:
+          - pgsql
+
+  redis-billionmail:
+    image: redis:7.4.2-alpine
+    hostname: redis
+    container_name: billionmail-redis
+    command: redis-server --requirepass ${REDISPASS:?REDISPASS is required} --appendonly yes
+    volumes:
+      - billionmail-redis-data:/data
+    restart: always
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDISPASS}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    sysctls:
+      - net.core.somaxconn=4096
+    networks:
+      billionmail-network:
+        aliases:
+          - redis
+
+  rspamd-billionmail:
+    image: billionmail/rspamd:1.2
+    hostname: rspamd
+    container_name: billionmail-rspamd
+    depends_on:
+      redis-billionmail:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - REDISPASS=${REDISPASS}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+    volumes:
+      - billionmail-rspamd-conf:/etc/rspamd/local.d
+      - billionmail-rspamd-data:/var/lib/rspamd
+      - billionmail-logs-rspamd:/var/log/rspamd
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11334/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      billionmail-network:
+        aliases:
+          - rspamd
+
+  dovecot-billionmail:
+    image: billionmail/dovecot:1.6
+    hostname: dovecot
+    container_name: billionmail-dovecot
+    depends_on:
+      pgsql-billionmail:
+        condition: service_healthy
+      redis-billionmail:
+        condition: service_healthy
+    cap_add:
+      - NET_BIND_SERVICE
+    volumes:
+      - billionmail-dovecot-conf:/etc/dovecot/conf.d
+      - billionmail-logs-dovecot:/var/log/mail
+      - billionmail-ssl:/etc/ssl/mail
+      - billionmail-ssl-self-signed:/etc/ssl/ssl-self-signed
+      - billionmail-vmail-data:/var/vmail
+      - billionmail-rspamd-data:/var/lib/rspamd
+      - billionmail-postgresql-socket:/var/run/postgresql
+    environment:
+      - DBNAME=${DBNAME:-billionmail}
+      - DBUSER=${DBUSER:-billionmail}
+      - DBPASS=${DBPASS}
+      - TZ=${TZ:-Etc/UTC}
+      - BILLIONMAIL_HOSTNAME=${BILLIONMAIL_HOSTNAME:?BILLIONMAIL_HOSTNAME is required}
+      - REDISPASS=${REDISPASS}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+    # Ports exposés directement sur l'hôte (pas via proxy)
+    ports:
+      - "${IMAP_PORT:-143}:143"
+      - "${IMAPS_PORT:-993}:993"
+      - "${POP_PORT:-110}:110"
+      - "${POPS_PORT:-995}:995"
+    restart: always
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 20000
+        hard: 40000
+    networks:
+      billionmail-network:
+        aliases:
+          - dovecot
+
+  postfix-billionmail:
+    image: billionmail/postfix:1.6
+    hostname: postfix
+    container_name: billionmail-postfix
+    depends_on:
+      pgsql-billionmail:
+        condition: service_healthy
+    volumes:
+      - billionmail-postfix-conf:/etc/postfix
+      - billionmail-logs-postfix:/var/log/mail
+      - billionmail-ssl:/etc/ssl/mail
+      - billionmail-postfix-data:/var/spool/postfix
+      - billionmail-rspamd-data:/var/lib/rspamd
+      - billionmail-postgresql-socket:/var/run/postgresql
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - DBNAME=${DBNAME:-billionmail}
+      - DBUSER=${DBUSER:-billionmail}
+      - DBPASS=${DBPASS}
+      - REDISPASS=${REDISPASS}
+      - BILLIONMAIL_HOSTNAME=${BILLIONMAIL_HOSTNAME}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+    cap_add:
+      - NET_BIND_SERVICE
+    # Ports SMTP exposés directement (CRITIQUE pour email)
+    ports:
+      - "${SMTP_PORT:-25}:25"
+      - "${SMTPS_PORT:-465}:465"
+      - "${SUBMISSION_PORT:-587}:587"
+    restart: always
+    healthcheck:
+      test: ["CMD", "postfix", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      billionmail-network:
+        aliases:
+          - postfix
+
+  webmail-billionmail:
+    image: roundcube/roundcubemail:1.6.11-fpm-alpine
+    hostname: roundcube
+    container_name: billionmail-webmail
+    depends_on:
+      pgsql-billionmail:
+        condition: service_healthy
+      dovecot-billionmail:
+        condition: service_started
+      postfix-billionmail:
+        condition: service_started
+    volumes:
+      - billionmail-webmail-data:/var/www/html
+      - billionmail-webmail-conf:/var/roundcube/config
+      - billionmail-php-conf:/usr/local/etc
+      - billionmail-php-sock:/var/run/
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - ROUNDCUBEMAIL_DB_TYPE=pgsql
+      - ROUNDCUBEMAIL_DB_HOST=pgsql
+      - ROUNDCUBEMAIL_DB_NAME=${DBNAME:-billionmail}
+      - ROUNDCUBEMAIL_DB_USER=${DBUSER:-billionmail}
+      - ROUNDCUBEMAIL_DB_PASSWORD=${DBPASS}
+      - ROUNDCUBEMAIL_DEFAULT_HOST=dovecot
+      - ROUNDCUBEMAIL_DEFAULT_PORT=${IMAP_PORT:-143}
+      - ROUNDCUBEMAIL_SMTP_SERVER=postfix
+      - ROUNDCUBEMAIL_SMTP_PORT=${SMTP_PORT:-25}
+      - ROUNDCUBEMAIL_REQUEST_PATH=/roundcube
+    restart: always
+    networks:
+      billionmail-network:
+        aliases:
+          - webmail
+
+  core-billionmail:
+    image: billionmail/core:4.9.0
+    hostname: core-manage
+    container_name: billionmail-core
+    depends_on:
+      pgsql-billionmail:
+        condition: service_healthy
+    volumes:
+      - billionmail-ssl:/etc/ssl/mail
+      - billionmail-ssl-self-signed:/etc/ssl/ssl-self-signed
+      - billionmail-fail2ban-filter:/etc/fail2ban/filter.d
+      - billionmail-fail2ban-jail:/etc/fail2ban/jail.d
+      - billionmail-logs-fail2ban:/var/log/fail2ban
+      - billionmail-postgresql-socket:/opt/billionmail/postgresql-socket
+      - billionmail-php-sock:/opt/billionmail/php-sock
+      - billionmail-rspamd-data:/opt/billionmail/rspamd-data
+      - billionmail-webmail-data:/opt/billionmail/webmail-data
+      - billionmail-conf:/opt/billionmail/conf
+      - billionmail-logs:/opt/billionmail/logs
+      - billionmail-logs-core:/opt/billionmail/core/logs
+      - billionmail-core-data:/opt/billionmail/core/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - billionmail-vmail-data:/opt/billionmail/vmail-data
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - FAIL2BAN_INIT=${FAIL2BAN_INIT:-y}
+      # Variables pour l'initialisation
+      - DBNAME=${DBNAME:-billionmail}
+      - DBUSER=${DBUSER:-billionmail}
+      - DBPASS=${DBPASS}
+      - REDISPASS=${REDISPASS}
+      - BILLIONMAIL_HOSTNAME=${BILLIONMAIL_HOSTNAME}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - SafePath=${SafePath:-billionmail}
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+      - NET_RAW
+    # Interface web - peut passer par le proxy Coolify
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health", "||", "exit", "0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      # Labels Coolify (optionnel - pour monitoring)
+      - "coolify.managed=true"
+      - "coolify.name=billionmail"
+    networks:
+      billionmail-network:
+        aliases:
+          - core
+
+# ============================================
+# VOLUMES NOMMÉS (persistants dans Coolify)
+# ============================================
+volumes:
+  billionmail-postgresql-data:
+    name: billionmail-postgresql-data
+  billionmail-postgresql-socket:
+    name: billionmail-postgresql-socket
+  billionmail-redis-data:
+    name: billionmail-redis-data
+  billionmail-rspamd-conf:
+    name: billionmail-rspamd-conf
+  billionmail-rspamd-data:
+    name: billionmail-rspamd-data
+  billionmail-dovecot-conf:
+    name: billionmail-dovecot-conf
+  billionmail-postfix-conf:
+    name: billionmail-postfix-conf
+  billionmail-postfix-data:
+    name: billionmail-postfix-data
+  billionmail-webmail-data:
+    name: billionmail-webmail-data
+  billionmail-webmail-conf:
+    name: billionmail-webmail-conf
+  billionmail-php-conf:
+    name: billionmail-php-conf
+  billionmail-php-sock:
+    name: billionmail-php-sock
+  billionmail-ssl:
+    name: billionmail-ssl
+  billionmail-ssl-self-signed:
+    name: billionmail-ssl-self-signed
+  billionmail-vmail-data:
+    name: billionmail-vmail-data
+  billionmail-conf:
+    name: billionmail-conf
+  billionmail-logs:
+    name: billionmail-logs
+  billionmail-logs-core:
+    name: billionmail-logs-core
+  billionmail-logs-rspamd:
+    name: billionmail-logs-rspamd
+  billionmail-logs-dovecot:
+    name: billionmail-logs-dovecot
+  billionmail-logs-postfix:
+    name: billionmail-logs-postfix
+  billionmail-logs-fail2ban:
+    name: billionmail-logs-fail2ban
+  billionmail-fail2ban-filter:
+    name: billionmail-fail2ban-filter
+  billionmail-fail2ban-jail:
+    name: billionmail-fail2ban-jail
+  billionmail-core-data:
+    name: billionmail-core-data
+
+# ============================================
+# RÉSEAU
+# ============================================
+networks:
+  billionmail-network:
+    name: billionmail-network
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${IPV4_NETWORK:-172.66.1}.0/24
