@@ -240,10 +240,18 @@ services:
       - NET_BIND_SERVICE
       - NET_ADMIN
       - NET_RAW
-    # Interface web - peut passer par le proxy Coolify
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
+    # Interface web - via proxy Coolify (ne pas exposer 80/443 directement)
+    # Les ports sont gérés par Traefik/Caddy de Coolify
+    # ports:
+    #   - "${HTTP_PORT:-80}:80"
+    #   - "${HTTPS_PORT:-443}:443"
+    # Si vous voulez des ports alternatifs sans proxy, décommentez:
+    # ports:
+    #   - "8080:80"
+    #   - "8443:443"
+    expose:
+      - "80"
+      - "443"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80/health", "||", "exit", "0"]
@@ -255,6 +263,11 @@ services:
       # Labels Coolify (optionnel - pour monitoring)
       - "coolify.managed=true"
       - "coolify.name=billionmail"
+      # Labels Traefik pour Coolify (interface web)
+      - "traefik.enable=true"
+      - "traefik.http.routers.billionmail.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.billionmail.entrypoints=http,https"
+      - "traefik.http.services.billionmail.loadbalancer.server.port=80"
     networks:
       billionmail-network:
         aliases:
