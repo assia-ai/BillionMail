@@ -265,13 +265,21 @@ services:
       - "coolify.name=billionmail"
       # Labels Traefik pour Coolify (interface web)
       - "traefik.enable=true"
-      - "traefik.http.routers.billionmail.rule=PathPrefix(`/`)"
-      - "traefik.http.routers.billionmail.entrypoints=http,https"
+      - "traefik.http.routers.billionmail-http.rule=Host(`${BILLIONMAIL_HOSTNAME:-mail.assia.ai}`)"
+      - "traefik.http.routers.billionmail-http.entrypoints=http"
+      - "traefik.http.routers.billionmail-https.rule=Host(`${BILLIONMAIL_HOSTNAME:-mail.assia.ai}`)"
+      - "traefik.http.routers.billionmail-https.entrypoints=https"
+      - "traefik.http.routers.billionmail-https.tls=true"
+      - "traefik.http.routers.billionmail-https.tls.certresolver=letsencrypt"
       - "traefik.http.services.billionmail.loadbalancer.server.port=80"
+      # Connecter au réseau Coolify
+      - "traefik.docker.network=coolify"
     networks:
       billionmail-network:
         aliases:
           - core
+      coolify:
+        # Réseau externe de Coolify pour le proxy
 
 # ============================================
 # VOLUMES NOMMÉS (persistants dans Coolify)
@@ -339,3 +347,6 @@ networks:
       driver: default
       config:
         - subnet: ${IPV4_NETWORK:-172.66.1}.0/24
+  # Réseau externe Coolify (créé automatiquement par Coolify)
+  coolify:
+    external: true
